@@ -1,6 +1,6 @@
 resource "k0s_cluster" "example" {
   name        = "example"
-  version     = "v1.31.0+k0s.0"
+  version     = "v1.32.2-k0s.0"
   single_node = true
 }
 
