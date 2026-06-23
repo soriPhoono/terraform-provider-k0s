@@ -81,6 +81,12 @@ func TestResourceSchema(t *testing.T) {
 		{name: "version", optional: true, computed: true},
 		{name: "image", optional: true, computed: true},
 		{name: "kubeconfig", computed: true, sensitive: true},
+		{name: "kubeconfig_path", optional: true},
+		{name: "wait_for_ready", optional: true, computed: true},
+		{name: "endpoint", computed: true},
+		{name: "client_certificate", computed: true, sensitive: true},
+		{name: "client_key", computed: true, sensitive: true},
+		{name: "cluster_ca_certificate", computed: true, sensitive: true},
 		{name: "single_node", optional: true, computed: true},
 		{name: "controller_count", optional: true, computed: true},
 		{name: "worker_count", optional: true, computed: true},
@@ -135,15 +141,16 @@ func TestResourceSchemaAttributes(t *testing.T) {
 	r.Schema(context.Background(), req, &resp)
 
 	attrs := resp.Schema.Attributes
-	if len(attrs) != 8 {
-		t.Errorf("expected 8 attributes, got %d", len(attrs))
+	if len(attrs) != 14 {
+		t.Errorf("expected 14 attributes, got %d", len(attrs))
 	}
 
 	for name, attr := range attrs {
 		switch attr := attr.(type) {
 		case schema.StringAttribute:
-			if name == "kubeconfig" && !attr.Sensitive {
-				t.Errorf("expected kubeconfig to be sensitive")
+			if (name == "kubeconfig" || name == "client_certificate" || name == "client_key" || name == "cluster_ca_certificate") &&
+				!attr.Sensitive {
+				t.Errorf("expected %s to be sensitive", name)
 			}
 			if name == "name" && !attr.Required {
 				t.Errorf("expected name to be required")

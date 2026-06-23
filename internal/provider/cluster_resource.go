@@ -36,14 +36,20 @@ type ClusterResource struct {
 }
 
 type ClusterResourceModel struct {
-	Id              types.String `tfsdk:"id"`
-	Name            types.String `tfsdk:"name"`
-	Version         types.String `tfsdk:"version"`
-	Image           types.String `tfsdk:"image"`
-	Kubeconfig      types.String `tfsdk:"kubeconfig"`
-	SingleNode      types.Bool   `tfsdk:"single_node"`
-	ControllerCount types.Int64  `tfsdk:"controller_count"`
-	WorkerCount     types.Int64  `tfsdk:"worker_count"`
+	Id                   types.String `tfsdk:"id"`
+	Name                 types.String `tfsdk:"name"`
+	Version              types.String `tfsdk:"version"`
+	Image                types.String `tfsdk:"image"`
+	Kubeconfig           types.String `tfsdk:"kubeconfig"`
+	KubeconfigPath       types.String `tfsdk:"kubeconfig_path"`
+	WaitForReady         types.Bool   `tfsdk:"wait_for_ready"`
+	Endpoint             types.String `tfsdk:"endpoint"`
+	ClientCertificate    types.String `tfsdk:"client_certificate"`
+	ClientKey            types.String `tfsdk:"client_key"`
+	ClusterCACertificate types.String `tfsdk:"cluster_ca_certificate"`
+	SingleNode           types.Bool   `tfsdk:"single_node"`
+	ControllerCount      types.Int64  `tfsdk:"controller_count"`
+	WorkerCount          types.Int64  `tfsdk:"worker_count"`
 }
 
 func imageForVersion(version string) string {
@@ -115,6 +121,35 @@ func (r *ClusterResource) Schema(
 			},
 			"kubeconfig": schema.StringAttribute{
 				MarkdownDescription: "Kubeconfig contents for accessing the cluster.",
+				Computed:            true,
+				Sensitive:           true,
+			},
+			"kubeconfig_path": schema.StringAttribute{
+				MarkdownDescription: "Path to write the kubeconfig file on the local filesystem.",
+				Optional:            true,
+			},
+			"wait_for_ready": schema.BoolAttribute{
+				MarkdownDescription: "Wait for the cluster control plane to be ready before returning.",
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(true),
+			},
+			"endpoint": schema.StringAttribute{
+				MarkdownDescription: "Kubernetes API server endpoint.",
+				Computed:            true,
+			},
+			"client_certificate": schema.StringAttribute{
+				MarkdownDescription: "Client certificate for authenticating to the cluster.",
+				Computed:            true,
+				Sensitive:           true,
+			},
+			"client_key": schema.StringAttribute{
+				MarkdownDescription: "Client key for authenticating to the cluster.",
+				Computed:            true,
+				Sensitive:           true,
+			},
+			"cluster_ca_certificate": schema.StringAttribute{
+				MarkdownDescription: "CA certificate for verifying the API server.",
 				Computed:            true,
 				Sensitive:           true,
 			},
@@ -193,6 +228,22 @@ func (r *ClusterResource) Create(
 	} else {
 		createMultiNode(ctx, docker, name, image, &data, resp)
 	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	setKubeconfigOutputs(&data)
+
+	if data.KubeconfigPath.ValueString() != "" {
+		if err := writeKubeconfigFile(
+			data.KubeconfigPath.ValueString(),
+			data.Kubeconfig.ValueString(),
+		); err != nil {
+			resp.Diagnostics.AddWarning("Could not write kubeconfig file", err.Error())
+		}
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *ClusterResource) Read(
@@ -223,6 +274,7 @@ func (r *ClusterResource) Read(
 		if err == nil {
 			data.Kubeconfig = types.StringValue(kubeconfig)
 		}
+		setKubeconfigOutputs(&data)
 	} else {
 		ctrlName := controllerName(clusterName, 1)
 		running, err := docker.isRunning(ctx, ctrlName)
@@ -238,6 +290,7 @@ func (r *ClusterResource) Read(
 		if err == nil {
 			data.Kubeconfig = types.StringValue(kubeconfig)
 		}
+		setKubeconfigOutputs(&data)
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -391,7 +444,6 @@ func createSingleNode(
 	data.Id = types.StringValue(name)
 	data.Image = types.StringValue(image)
 	data.Kubeconfig = types.StringValue(kubeconfig)
-	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
 }
 
 // --- multi-node ------------------------------------------------------------
@@ -510,7 +562,28 @@ func createMultiNode(
 	data.Id = types.StringValue(clusterName)
 	data.Image = types.StringValue(image)
 	data.Kubeconfig = types.StringValue(kubeconfig)
-	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+}
+
+// --- kubeconfig helpers ---------------------------------------------------
+
+func setKubeconfigOutputs(data *ClusterResourceModel) {
+	kcfg, err := parseKubeconfig(data.Kubeconfig.ValueString())
+	if err != nil {
+		// Not a hard error — the raw kubeconfig is still available.
+		return
+	}
+	if kcfg.Endpoint != "" {
+		data.Endpoint = types.StringValue(kcfg.Endpoint)
+	}
+	if kcfg.ClusterCACertificate != "" {
+		data.ClusterCACertificate = types.StringValue(kcfg.ClusterCACertificate)
+	}
+	if kcfg.ClientCertificate != "" {
+		data.ClientCertificate = types.StringValue(kcfg.ClientCertificate)
+	}
+	if kcfg.ClientKey != "" {
+		data.ClientKey = types.StringValue(kcfg.ClientKey)
+	}
 }
 
 // --- readiness -------------------------------------------------------------

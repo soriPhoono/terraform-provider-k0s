@@ -10,7 +10,8 @@ testacc:
 	TF_ACC=1 CGO_ENABLED=0 go test ./... -v
 
 generate:
-	go generate ./...
+	go generate .
+	@echo "Docs regenerated in docs/"
 
 fmt:
 	go fmt ./...
