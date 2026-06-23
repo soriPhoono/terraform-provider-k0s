@@ -76,7 +76,10 @@ func (p *K0sProvider) Resources(ctx context.Context) []func() resource.Resource 
 }
 
 func (p *K0sProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		NewClusterDataSource,
+		NewVersionsDataSource,
+	}
 }
 
 // New returns a factory function used by the plugin framework to instantiate

@@ -100,3 +100,7 @@ func (d *dockerClient) exec(
 	args := append([]string{"exec", container}, cmdArgs...)
 	return d.run(ctx, args...)
 }
+
+func (d *dockerClient) inspectField(ctx context.Context, container, format string) (string, error) {
+	return d.run(ctx, "inspect", "--format", format, container)
+}

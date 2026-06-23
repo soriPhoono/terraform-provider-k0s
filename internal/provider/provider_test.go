@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -155,9 +156,31 @@ func TestProviderResources(t *testing.T) {
 
 func TestProviderDataSources(t *testing.T) {
 	p := New("test")()
-	datasources := p.DataSources(context.Background())
+	dsList := p.DataSources(context.Background())
 
-	if len(datasources) != 0 {
-		t.Errorf("expected no data sources, got %d", len(datasources))
+	if len(dsList) != 2 {
+		t.Fatalf("expected 2 data sources, got %d", len(dsList))
+	}
+
+	foundCluster := false
+	foundVersions := false
+	for _, f := range dsList {
+		ds := f()
+		req := datasource.MetadataRequest{ProviderTypeName: "k0s"}
+		var resp datasource.MetadataResponse
+		ds.Metadata(context.Background(), req, &resp)
+		switch resp.TypeName {
+		case "k0s_cluster":
+			foundCluster = true
+		case "k0s_versions":
+			foundVersions = true
+		}
+	}
+
+	if !foundCluster {
+		t.Error("expected k0s_cluster data source")
+	}
+	if !foundVersions {
+		t.Error("expected k0s_versions data source")
 	}
 }
