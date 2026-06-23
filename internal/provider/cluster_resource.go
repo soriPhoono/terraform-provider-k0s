@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 )
 
 const defaultK0sVersion = "v1.35.1-k0s.1"
-const clusterReadyTimeout = 90 * time.Second
+const clusterReadyTimeout = 120 * time.Second
 const readinessPollInterval = 2 * time.Second
 
 var _ resource.Resource = &ClusterResource{}
@@ -53,6 +54,18 @@ func imageForVersion(version string) string {
 	return "docker.io/k0sproject/k0s:" + tag
 }
 
+func controllerName(cluster string, idx int) string {
+	return fmt.Sprintf("%s-controller-%d", cluster, idx)
+}
+
+func workerName(cluster string, idx int) string {
+	return fmt.Sprintf("%s-worker-%d", cluster, idx)
+}
+
+func networkName(cluster string) string {
+	return "k0s-" + cluster
+}
+
 func (r *ClusterResource) Metadata(
 	ctx context.Context,
 	req resource.MetadataRequest,
@@ -71,13 +84,13 @@ func (r *ClusterResource) Schema(
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
-				MarkdownDescription: "Docker container name / unique identifier.",
+				MarkdownDescription: "Cluster identifier (the cluster name).",
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Cluster name; used as the Docker container name.",
+				MarkdownDescription: "Cluster name; used to name containers and the Docker network.",
 				Required:            true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
@@ -106,16 +119,17 @@ func (r *ClusterResource) Schema(
 				Sensitive:           true,
 			},
 			"single_node": schema.BoolAttribute{
-				MarkdownDescription: "Run a single-node cluster (controller + worker in one container).",
-				Optional:            true,
-				Computed:            true,
-				Default:             booldefault.StaticBool(true),
+				MarkdownDescription: "Run a single-node cluster (controller + worker in one container). " +
+					"When false, separate controller and worker containers are created.",
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(true),
 				PlanModifiers: []planmodifier.Bool{
 					boolplanmodifier.RequiresReplace(),
 				},
 			},
 			"controller_count": schema.Int64Attribute{
-				MarkdownDescription: "Number of controller nodes (multi-node support coming soon).",
+				MarkdownDescription: "Number of controller nodes (only used when single_node is false).",
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(1),
@@ -124,7 +138,7 @@ func (r *ClusterResource) Schema(
 				},
 			},
 			"worker_count": schema.Int64Attribute{
-				MarkdownDescription: "Number of worker nodes (multi-node support coming soon).",
+				MarkdownDescription: "Number of worker nodes (only used when single_node is false).",
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(0),
@@ -171,51 +185,14 @@ func (r *ClusterResource) Create(
 
 	image := data.Image.ValueString()
 	if image == "" {
-		version := data.Version.ValueString()
-		image = imageForVersion(version)
+		image = imageForVersion(data.Version.ValueString())
 	}
 
-	containerArgs := []string{"k0s", "controller"}
 	if data.SingleNode.ValueBool() {
-		containerArgs = append(containerArgs, "--enable-worker")
+		createSingleNode(ctx, docker, name, image, &data, resp)
+	} else {
+		createMultiNode(ctx, docker, name, image, &data, resp)
 	}
-
-	ports := []string{"6443:6443"}
-	if !data.SingleNode.ValueBool() {
-		ports = append(ports, "9443:9443", "8132:8132")
-	}
-
-	_, err := docker.createContainer(ctx,
-		name, name, image,
-		true,
-		ports,
-		[]string{"/var/lib/k0s"},
-		[]string{"/run"},
-		containerArgs,
-	)
-	if err != nil {
-		resp.Diagnostics.AddError("Failed to create container", err.Error())
-		return
-	}
-
-	if err := docker.startContainer(ctx, name); err != nil {
-		_ = docker.removeContainer(ctx, name, true)
-		resp.Diagnostics.AddError("Failed to start container", err.Error())
-		return
-	}
-
-	kubeconfig, err := waitForReadiness(ctx, docker, name)
-	if err != nil {
-		_ = docker.removeContainer(ctx, name, true)
-		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
-		return
-	}
-
-	data.Id = types.StringValue(name)
-	data.Image = types.StringValue(image)
-	data.Kubeconfig = types.StringValue(kubeconfig)
-
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *ClusterResource) Read(
@@ -230,20 +207,37 @@ func (r *ClusterResource) Read(
 	}
 
 	docker := newDockerClient(r.binaryPath)
-	running, err := docker.isRunning(ctx, data.Id.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Failed to inspect container", err.Error())
-		return
-	}
+	clusterName := data.Id.ValueString()
 
-	if !running {
-		resp.State.RemoveResource(ctx)
-		return
-	}
-
-	kubeconfig, err := docker.exec(ctx, data.Id.ValueString(), "k0s", "kubeconfig", "admin")
-	if err == nil {
-		data.Kubeconfig = types.StringValue(kubeconfig)
+	if data.SingleNode.ValueBool() {
+		running, err := docker.isRunning(ctx, clusterName)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to inspect container", err.Error())
+			return
+		}
+		if !running {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		kubeconfig, err := docker.exec(ctx, clusterName, "k0s", "kubeconfig", "admin")
+		if err == nil {
+			data.Kubeconfig = types.StringValue(kubeconfig)
+		}
+	} else {
+		ctrlName := controllerName(clusterName, 1)
+		running, err := docker.isRunning(ctx, ctrlName)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to inspect controller", err.Error())
+			return
+		}
+		if !running {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		kubeconfig, err := docker.exec(ctx, ctrlName, "k0s", "kubeconfig", "admin")
+		if err == nil {
+			data.Kubeconfig = types.StringValue(kubeconfig)
+		}
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -273,9 +267,19 @@ func (r *ClusterResource) Delete(
 		return
 	}
 
+	clusterName := data.Id.ValueString()
 	docker := newDockerClient(r.binaryPath)
-	if err := docker.removeContainer(ctx, data.Id.ValueString(), true); err != nil {
-		resp.Diagnostics.AddError("Failed to delete container", err.Error())
+
+	if data.SingleNode.ValueBool() {
+		_ = docker.removeContainer(ctx, clusterName, true)
+	} else {
+		for i := 1; i <= int(data.WorkerCount.ValueInt64()); i++ {
+			_ = docker.removeContainer(ctx, workerName(clusterName, i), true)
+		}
+		for i := 1; i <= int(data.ControllerCount.ValueInt64()); i++ {
+			_ = docker.removeContainer(ctx, controllerName(clusterName, i), true)
+		}
+		_ = docker.removeNetwork(ctx, networkName(clusterName))
 	}
 }
 
@@ -286,6 +290,170 @@ func (r *ClusterResource) ImportState(
 ) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
+
+// --- single-node -----------------------------------------------------------
+
+func createSingleNode(
+	ctx context.Context,
+	docker *dockerClient,
+	name, image string,
+	data *ClusterResourceModel,
+	resp *resource.CreateResponse,
+) {
+	containerArgs := []string{"k0s", "controller", "--enable-worker"}
+	ports := []string{"6443:6443"}
+
+	_, err := docker.createContainer(ctx,
+		name, name, image,
+		true, ports,
+		[]string{"/var/lib/k0s"}, []string{"/run"},
+		"",
+		containerArgs,
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create container", err.Error())
+		return
+	}
+
+	if err := docker.startContainer(ctx, name); err != nil {
+		_ = docker.removeContainer(ctx, name, true)
+		resp.Diagnostics.AddError("Failed to start container", err.Error())
+		return
+	}
+
+	kubeconfig, err := waitForReadiness(ctx, docker, name)
+	if err != nil {
+		_ = docker.removeContainer(ctx, name, true)
+		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
+		return
+	}
+
+	data.Id = types.StringValue(name)
+	data.Image = types.StringValue(image)
+	data.Kubeconfig = types.StringValue(kubeconfig)
+	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+}
+
+// --- multi-node ------------------------------------------------------------
+
+func createMultiNode(
+	ctx context.Context,
+	docker *dockerClient,
+	clusterName, image string,
+	data *ClusterResourceModel,
+	resp *resource.CreateResponse,
+) {
+	netName := networkName(clusterName)
+
+	if _, err := docker.createNetwork(ctx, netName); err != nil {
+		resp.Diagnostics.AddError("Failed to create network", err.Error())
+		return
+	}
+	removeNet := true
+	defer func() {
+		if removeNet {
+			_ = docker.removeNetwork(ctx, netName)
+		}
+	}()
+
+	cc := int(data.ControllerCount.ValueInt64())
+	wc := int(data.WorkerCount.ValueInt64())
+
+	// --- create controllers ---
+	for i := 1; i <= cc; i++ {
+		cName := controllerName(clusterName, i)
+		ports := []string{fmt.Sprintf("%d:6443", 6443+i-1)}
+		if i == 1 {
+			ports = append(ports, fmt.Sprintf("%d:9443", 9443+i-1))
+		}
+
+		ctrlArgs := []string{"k0s", "controller"}
+		_, err := docker.createContainer(ctx,
+			cName, cName, image,
+			true, ports,
+			[]string{"/var/lib/k0s"}, []string{"/run"},
+			netName,
+			ctrlArgs,
+		)
+		if err != nil {
+			resp.Diagnostics.AddError(fmt.Sprintf("Failed to create %s", cName), err.Error())
+			return
+		}
+
+		if err := docker.startContainer(ctx, cName); err != nil {
+			_ = docker.removeContainer(ctx, cName, true)
+			resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", cName), err.Error())
+			return
+		}
+	}
+
+	firstController := controllerName(clusterName, 1)
+
+	kubeconfig, err := waitForReadiness(ctx, docker, firstController)
+	if err != nil {
+		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
+		return
+	}
+
+	// --- generate worker token ---
+	token, err := docker.exec(ctx, firstController, "k0s", "token", "create", "--role=worker")
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to generate worker join token", err.Error())
+		return
+	}
+	token = strings.TrimSpace(token)
+
+	tokenFile, err := os.CreateTemp("", "k0s-join-token-*")
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create temp token file", err.Error())
+		return
+	}
+	tokenPath := tokenFile.Name()
+	if _, err := tokenFile.WriteString(token); err != nil {
+		_ = tokenFile.Close()
+		_ = os.Remove(tokenPath)
+		resp.Diagnostics.AddError("Failed to write token file", err.Error())
+		return
+	}
+	_ = tokenFile.Close()
+	defer func() { _ = os.Remove(tokenPath) }()
+
+	// --- create workers ---
+	for i := 1; i <= wc; i++ {
+		wName := workerName(clusterName, i)
+		workerArgs := []string{
+			"k0s", "worker",
+			"--token-file", tokenPath,
+		}
+
+		_, err := docker.createContainer(ctx,
+			wName, wName, image,
+			true, nil,
+			[]string{"/var/lib/k0s", tokenPath + ":" + tokenPath},
+			[]string{"/run"},
+			netName,
+			workerArgs,
+		)
+		if err != nil {
+			resp.Diagnostics.AddError(fmt.Sprintf("Failed to create %s", wName), err.Error())
+			return
+		}
+
+		if err := docker.startContainer(ctx, wName); err != nil {
+			_ = docker.removeContainer(ctx, wName, true)
+			resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", wName), err.Error())
+			return
+		}
+	}
+
+	removeNet = false
+	data.Id = types.StringValue(clusterName)
+	data.Image = types.StringValue(image)
+	data.Kubeconfig = types.StringValue(kubeconfig)
+	resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+}
+
+// --- readiness -------------------------------------------------------------
 
 func waitForReadiness(ctx context.Context, docker *dockerClient, name string) (string, error) {
 	deadline := time.Now().Add(clusterReadyTimeout)

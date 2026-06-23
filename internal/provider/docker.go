@@ -48,9 +48,8 @@ func (d *dockerClient) createContainer(
 	ctx context.Context,
 	name, hostname, image string,
 	privileged bool,
-	ports []string,
-	volumes []string,
-	tmpfs []string,
+	ports, volumes, tmpfs []string,
+	network string,
 	cmdArgs []string,
 ) (string, error) {
 	args := []string{"create"}
@@ -71,6 +70,9 @@ func (d *dockerClient) createContainer(
 	}
 	for _, t := range tmpfs {
 		args = append(args, "--tmpfs", t)
+	}
+	if network != "" {
+		args = append(args, "--network", network)
 	}
 	args = append(args, image)
 	args = append(args, cmdArgs...)
@@ -103,4 +105,13 @@ func (d *dockerClient) exec(
 
 func (d *dockerClient) inspectField(ctx context.Context, container, format string) (string, error) {
 	return d.run(ctx, "inspect", "--format", format, container)
+}
+
+func (d *dockerClient) createNetwork(ctx context.Context, name string) (string, error) {
+	return d.run(ctx, "network", "create", "--driver", "bridge", name)
+}
+
+func (d *dockerClient) removeNetwork(ctx context.Context, name string) error {
+	_, err := d.run(ctx, "network", "rm", name)
+	return err
 }
