@@ -288,7 +288,67 @@ func (r *ClusterResource) ImportState(
 	req resource.ImportStateRequest,
 	resp *resource.ImportStateResponse,
 ) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	id := req.ID
+	docker := newDockerClient(r.binaryPath)
+
+	running, err := docker.isRunning(ctx, id)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to inspect container during import", err.Error())
+		return
+	}
+
+	if running {
+		resp.State.SetAttribute(ctx, path.Root("id"), id)
+		resp.State.SetAttribute(ctx, path.Root("name"), id)
+		resp.State.SetAttribute(ctx, path.Root("single_node"), true)
+		resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(1))
+		resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(0))
+		image, err := docker.inspectField(ctx, id, "{{.Config.Image}}")
+		if err == nil {
+			resp.State.SetAttribute(ctx, path.Root("image"), image)
+			resp.State.SetAttribute(ctx, path.Root("version"), extractVersionFromImage(image))
+		}
+		return
+	}
+
+	ctrlName := controllerName(id, 1)
+	running, err = docker.isRunning(ctx, ctrlName)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to inspect controller during import", err.Error())
+		return
+	}
+	if !running {
+		resp.Diagnostics.AddError("Cluster not found",
+			"No running container found matching the import ID: "+id)
+		return
+	}
+
+	cc := 1
+	for {
+		if r, _ := docker.isRunning(ctx, controllerName(id, cc+1)); !r {
+			break
+		}
+		cc++
+	}
+
+	wc := 0
+	for {
+		if r, _ := docker.isRunning(ctx, workerName(id, wc+1)); !r {
+			break
+		}
+		wc++
+	}
+
+	resp.State.SetAttribute(ctx, path.Root("id"), id)
+	resp.State.SetAttribute(ctx, path.Root("name"), id)
+	resp.State.SetAttribute(ctx, path.Root("single_node"), false)
+	resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(cc))
+	resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(wc))
+	image, err := docker.inspectField(ctx, ctrlName, "{{.Config.Image}}")
+	if err == nil {
+		resp.State.SetAttribute(ctx, path.Root("image"), image)
+		resp.State.SetAttribute(ctx, path.Root("version"), extractVersionFromImage(image))
+	}
 }
 
 // --- single-node -----------------------------------------------------------

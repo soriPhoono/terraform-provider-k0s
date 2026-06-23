@@ -35,8 +35,9 @@ func (d *dockerClient) run(ctx context.Context, args ...string) (string, error) 
 func (d *dockerClient) isRunning(ctx context.Context, container string) (bool, error) {
 	state, err := d.run(ctx, "inspect", "--format", "{{.State.Status}}", container)
 	if err != nil {
-		if strings.Contains(err.Error(), "No such object") ||
-			strings.Contains(err.Error(), "No such container") {
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "no such object") ||
+			strings.Contains(errStr, "no such container") {
 			return false, nil
 		}
 		return false, err
@@ -105,6 +106,18 @@ func (d *dockerClient) exec(
 
 func (d *dockerClient) inspectField(ctx context.Context, container, format string) (string, error) {
 	return d.run(ctx, "inspect", "--format", format, container)
+}
+
+func (d *dockerClient) networkExists(ctx context.Context, name string) (bool, error) {
+	_, err := d.run(ctx, "network", "inspect", name)
+	if err != nil {
+		if strings.Contains(err.Error(), "No such network") ||
+			strings.Contains(err.Error(), "not found") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (d *dockerClient) createNetwork(ctx context.Context, name string) (string, error) {
