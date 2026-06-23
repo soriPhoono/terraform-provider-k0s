@@ -1,0 +1,20 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: CGO_ENABLED=0 go build -o terraform-provider-k0s
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Unit tests
+        run: CGO_ENABLED=0 go test ./internal/provider/... -count=1

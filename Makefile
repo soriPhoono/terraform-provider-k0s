@@ -18,4 +18,11 @@ fmt:
 lint:
 	golangci-lint run
 
-.PHONY: build test testacc generate fmt lint
+release:
+	@echo "Tag the release first: git tag v1.0.0 && git push origin v1.0.0"
+	@echo "Then run: goreleaser release --clean"
+
+release-dry-run:
+	goreleaser release --clean --skip=publish --skip=sign
+
+.PHONY: build test testacc generate fmt lint release release-dry-run
