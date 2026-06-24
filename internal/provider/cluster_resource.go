@@ -412,6 +412,7 @@ func (r *ClusterResource) ImportState(
 		resp.State.SetAttribute(ctx, path.Root("single_node"), true)
 		resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(1))
 		resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(0))
+		resp.State.SetAttribute(ctx, path.Root("wait_for_ready"), true)
 		image, err := docker.inspectField(ctx, id, "{{.Config.Image}}")
 		if err == nil {
 			resp.State.SetAttribute(ctx, path.Root("image"), image)
@@ -453,6 +454,7 @@ func (r *ClusterResource) ImportState(
 	resp.State.SetAttribute(ctx, path.Root("single_node"), false)
 	resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(cc))
 	resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(wc))
+	resp.State.SetAttribute(ctx, path.Root("wait_for_ready"), true)
 	image, err := docker.inspectField(ctx, ctrlName, "{{.Config.Image}}")
 	if err == nil {
 		resp.State.SetAttribute(ctx, path.Root("image"), image)
