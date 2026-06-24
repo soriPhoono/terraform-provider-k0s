@@ -43,6 +43,10 @@ type ClusterResourceModel struct {
 	Kubeconfig           types.String `tfsdk:"kubeconfig"`
 	KubeconfigPath       types.String `tfsdk:"kubeconfig_path"`
 	WaitForReady         types.Bool   `tfsdk:"wait_for_ready"`
+	Ports                types.List   `tfsdk:"ports"`
+	Volumes              types.List   `tfsdk:"volumes"`
+	Tmpfs                types.List   `tfsdk:"tmpfs"`
+	Env                  types.Map    `tfsdk:"env"`
 	Endpoint             types.String `tfsdk:"endpoint"`
 	ClientCertificate    types.String `tfsdk:"client_certificate"`
 	ClientKey            types.String `tfsdk:"client_key"`
@@ -61,6 +65,30 @@ func imageForVersion(version string) string {
 		tag = "v" + tag
 	}
 	return "docker.io/k0sproject/k0s:" + tag
+}
+
+func expandStringList(v types.List) []string {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	elems := v.Elements()
+	r := make([]string, len(elems))
+	for i, e := range elems {
+		r[i] = e.(types.String).ValueString()
+	}
+	return r
+}
+
+func expandStringMap(v types.Map) map[string]string {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	elems := v.Elements()
+	r := make(map[string]string, len(elems))
+	for k, e := range elems {
+		r[k] = e.(types.String).ValueString()
+	}
+	return r
 }
 
 func controllerName(cluster string, idx int) string {
@@ -136,6 +164,29 @@ func (r *ClusterResource) Schema(
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
+			},
+			"ports": schema.ListAttribute{
+				MarkdownDescription: "Container port mappings (e.g. [\"6443:6443\"]). " +
+					"Defaults to auto-assigned host ports when not set.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"volumes": schema.ListAttribute{
+				MarkdownDescription: "Container volume mounts (e.g. [\"/host/path:/container/path\"]). " +
+					"Defaults to [\"/var/lib/k0s\"] when not set.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"tmpfs": schema.ListAttribute{
+				MarkdownDescription: "Container tmpfs mounts (e.g. [\"/run\"]). " +
+					"Defaults to [\"/run\"] when not set.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"env": schema.MapAttribute{
+				MarkdownDescription: "Environment variables to set in the container.",
+				Optional:            true,
+				ElementType:         types.StringType,
 			},
 			"endpoint": schema.StringAttribute{
 				MarkdownDescription: "Kubernetes API server endpoint.",
@@ -420,12 +471,24 @@ func createSingleNode(
 	resp *resource.CreateResponse,
 ) {
 	containerArgs := []string{"k0s", "controller", "--enable-worker"}
-	ports := []string{"6443:6443"}
+
+	ports := expandStringList(data.Ports)
+	if ports == nil {
+		ports = []string{"6443:6443"}
+	}
+	volumes := expandStringList(data.Volumes)
+	if volumes == nil {
+		volumes = []string{"/var/lib/k0s"}
+	}
+	tmpfs := expandStringList(data.Tmpfs)
+	if tmpfs == nil {
+		tmpfs = []string{"/run"}
+	}
+	env := expandStringMap(data.Env)
 
 	_, err := docker.createContainer(ctx,
 		name, name, image,
-		true, ports,
-		[]string{"/var/lib/k0s"}, []string{"/run"},
+		true, ports, volumes, tmpfs, env,
 		"",
 		containerArgs,
 	)
@@ -483,19 +546,34 @@ func createMultiNode(
 	cc := int(data.ControllerCount.ValueInt64())
 	wc := int(data.WorkerCount.ValueInt64())
 
+	userPorts := expandStringList(data.Ports)
+	volumes := expandStringList(data.Volumes)
+	if volumes == nil {
+		volumes = []string{"/var/lib/k0s"}
+	}
+	tmpfs := expandStringList(data.Tmpfs)
+	if tmpfs == nil {
+		tmpfs = []string{"/run"}
+	}
+	env := expandStringMap(data.Env)
+
 	// --- create controllers ---
 	for i := 1; i <= cc; i++ {
 		cName := controllerName(clusterName, i)
-		ports := []string{fmt.Sprintf("%d:6443", 6443+i-1)}
-		if i == 1 {
-			ports = append(ports, fmt.Sprintf("%d:9443", 9443+i-1))
+		var ports []string
+		if userPorts != nil {
+			ports = userPorts
+		} else {
+			ports = []string{fmt.Sprintf("%d:6443", 6443+i-1)}
+			if i == 1 {
+				ports = append(ports, fmt.Sprintf("%d:9443", 9443+i-1))
+			}
 		}
 
 		ctrlArgs := []string{"k0s", "controller"}
 		_, err := docker.createContainer(ctx,
 			cName, cName, image,
-			true, ports,
-			[]string{"/var/lib/k0s"}, []string{"/run"},
+			true, ports, volumes, tmpfs, env,
 			netName,
 			ctrlArgs,
 		)
@@ -554,11 +632,11 @@ func createMultiNode(
 				"--token-file", tokenPath,
 			}
 
+			workerVolumes := append(append([]string{}, volumes...), tokenPath+":"+tokenPath)
+
 			_, err := docker.createContainer(ctx,
 				wName, wName, image,
-				true, nil,
-				[]string{"/var/lib/k0s", tokenPath + ":" + tokenPath},
-				[]string{"/run"},
+				true, userPorts, workerVolumes, tmpfs, env,
 				netName,
 				workerArgs,
 			)

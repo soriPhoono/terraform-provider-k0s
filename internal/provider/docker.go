@@ -50,6 +50,7 @@ func (d *dockerClient) createContainer(
 	name, hostname, image string,
 	privileged bool,
 	ports, volumes, tmpfs []string,
+	env map[string]string,
 	network string,
 	cmdArgs []string,
 ) (string, error) {
@@ -71,6 +72,9 @@ func (d *dockerClient) createContainer(
 	}
 	for _, t := range tmpfs {
 		args = append(args, "--tmpfs", t)
+	}
+	for k, v := range env {
+		args = append(args, "-e", k+"="+v)
 	}
 	if network != "" {
 		args = append(args, "--network", network)
