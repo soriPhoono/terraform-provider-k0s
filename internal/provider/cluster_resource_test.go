@@ -35,7 +35,7 @@ func TestImageForVersion(t *testing.T) {
 		},
 		{
 			version: "",
-			want:    "docker.io/k0sproject/k0s:v",
+			want:    "",
 		},
 	}
 

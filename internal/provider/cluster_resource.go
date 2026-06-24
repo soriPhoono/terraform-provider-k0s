@@ -53,6 +53,9 @@ type ClusterResourceModel struct {
 }
 
 func imageForVersion(version string) string {
+	if version == "" {
+		return ""
+	}
 	tag := strings.ReplaceAll(version, "+", "-")
 	if !strings.HasPrefix(tag, "v") {
 		tag = "v" + tag
@@ -223,10 +226,12 @@ func (r *ClusterResource) Create(
 		image = imageForVersion(data.Version.ValueString())
 	}
 
+	waitForReady := data.WaitForReady.ValueBool()
+
 	if data.SingleNode.ValueBool() {
-		createSingleNode(ctx, docker, name, image, &data, resp)
+		createSingleNode(ctx, docker, name, image, waitForReady, &data, resp)
 	} else {
-		createMultiNode(ctx, docker, name, image, &data, resp)
+		createMultiNode(ctx, docker, name, image, waitForReady, &data, resp)
 	}
 	if resp.Diagnostics.HasError() {
 		return
@@ -410,6 +415,7 @@ func createSingleNode(
 	ctx context.Context,
 	docker *dockerClient,
 	name, image string,
+	waitForReady bool,
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
@@ -434,11 +440,16 @@ func createSingleNode(
 		return
 	}
 
-	kubeconfig, err := waitForReadiness(ctx, docker, name)
-	if err != nil {
-		_ = docker.removeContainer(ctx, name, true)
-		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
-		return
+	var kubeconfig string
+	if waitForReady {
+		kubeconfig, err = waitForReadiness(ctx, docker, name)
+		if err != nil {
+			_ = docker.removeContainer(ctx, name, true)
+			resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
+			return
+		}
+	} else {
+		kubeconfig, _ = docker.exec(ctx, name, "k0s", "kubeconfig", "admin")
 	}
 
 	data.Id = types.StringValue(name)
@@ -452,6 +463,7 @@ func createMultiNode(
 	ctx context.Context,
 	docker *dockerClient,
 	clusterName, image string,
+	waitForReady bool,
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
@@ -501,60 +513,65 @@ func createMultiNode(
 
 	firstController := controllerName(clusterName, 1)
 
-	kubeconfig, err := waitForReadiness(ctx, docker, firstController)
-	if err != nil {
-		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
-		return
-	}
+	var kubeconfig string
+	var err error
 
-	// --- generate worker token ---
-	token, err := docker.exec(ctx, firstController, "k0s", "token", "create", "--role=worker")
-	if err != nil {
-		resp.Diagnostics.AddError("Failed to generate worker join token", err.Error())
-		return
-	}
-	token = strings.TrimSpace(token)
-
-	tokenFile, err := os.CreateTemp("", "k0s-join-token-*")
-	if err != nil {
-		resp.Diagnostics.AddError("Failed to create temp token file", err.Error())
-		return
-	}
-	tokenPath := tokenFile.Name()
-	if _, err := tokenFile.WriteString(token); err != nil {
-		_ = tokenFile.Close()
-		_ = os.Remove(tokenPath)
-		resp.Diagnostics.AddError("Failed to write token file", err.Error())
-		return
-	}
-	_ = tokenFile.Close()
-	defer func() { _ = os.Remove(tokenPath) }()
-
-	// --- create workers ---
-	for i := 1; i <= wc; i++ {
-		wName := workerName(clusterName, i)
-		workerArgs := []string{
-			"k0s", "worker",
-			"--token-file", tokenPath,
-		}
-
-		_, err := docker.createContainer(ctx,
-			wName, wName, image,
-			true, nil,
-			[]string{"/var/lib/k0s", tokenPath + ":" + tokenPath},
-			[]string{"/run"},
-			netName,
-			workerArgs,
-		)
+	if waitForReady {
+		kubeconfig, err = waitForReadiness(ctx, docker, firstController)
 		if err != nil {
-			resp.Diagnostics.AddError(fmt.Sprintf("Failed to create %s", wName), err.Error())
+			resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
 			return
 		}
 
-		if err := docker.startContainer(ctx, wName); err != nil {
-			_ = docker.removeContainer(ctx, wName, true)
-			resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", wName), err.Error())
+		// --- generate worker token ---
+		token, err := docker.exec(ctx, firstController, "k0s", "token", "create", "--role=worker")
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to generate worker join token", err.Error())
 			return
+		}
+		token = strings.TrimSpace(token)
+
+		tokenFile, err := os.CreateTemp("", "k0s-join-token-*")
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to create temp token file", err.Error())
+			return
+		}
+		tokenPath := tokenFile.Name()
+		if _, err := tokenFile.WriteString(token); err != nil {
+			_ = tokenFile.Close()
+			_ = os.Remove(tokenPath)
+			resp.Diagnostics.AddError("Failed to write token file", err.Error())
+			return
+		}
+		_ = tokenFile.Close()
+		defer func() { _ = os.Remove(tokenPath) }()
+
+		// --- create workers ---
+		for i := 1; i <= wc; i++ {
+			wName := workerName(clusterName, i)
+			workerArgs := []string{
+				"k0s", "worker",
+				"--token-file", tokenPath,
+			}
+
+			_, err := docker.createContainer(ctx,
+				wName, wName, image,
+				true, nil,
+				[]string{"/var/lib/k0s", tokenPath + ":" + tokenPath},
+				[]string{"/run"},
+				netName,
+				workerArgs,
+			)
+			if err != nil {
+				resp.Diagnostics.AddError(fmt.Sprintf("Failed to create %s", wName), err.Error())
+				return
+			}
+
+			if err := docker.startContainer(ctx, wName); err != nil {
+				_ = docker.removeContainer(ctx, wName, true)
+				resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", wName), err.Error())
+				return
+			}
 		}
 	}
 
@@ -567,23 +584,23 @@ func createMultiNode(
 // --- kubeconfig helpers ---------------------------------------------------
 
 func setKubeconfigOutputs(data *ClusterResourceModel) {
+	ep := ""
+	ca := ""
+	cert := ""
+	key := ""
+
 	kcfg, err := parseKubeconfig(data.Kubeconfig.ValueString())
-	if err != nil {
-		// Not a hard error — the raw kubeconfig is still available.
-		return
+	if err == nil {
+		ep = kcfg.Endpoint
+		ca = kcfg.ClusterCACertificate
+		cert = kcfg.ClientCertificate
+		key = kcfg.ClientKey
 	}
-	if kcfg.Endpoint != "" {
-		data.Endpoint = types.StringValue(kcfg.Endpoint)
-	}
-	if kcfg.ClusterCACertificate != "" {
-		data.ClusterCACertificate = types.StringValue(kcfg.ClusterCACertificate)
-	}
-	if kcfg.ClientCertificate != "" {
-		data.ClientCertificate = types.StringValue(kcfg.ClientCertificate)
-	}
-	if kcfg.ClientKey != "" {
-		data.ClientKey = types.StringValue(kcfg.ClientKey)
-	}
+
+	data.Endpoint = types.StringValue(ep)
+	data.ClusterCACertificate = types.StringValue(ca)
+	data.ClientCertificate = types.StringValue(cert)
+	data.ClientKey = types.StringValue(key)
 }
 
 // --- readiness -------------------------------------------------------------
