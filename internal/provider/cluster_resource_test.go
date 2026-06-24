@@ -35,7 +35,7 @@ func TestImageForVersion(t *testing.T) {
 		},
 		{
 			version: "",
-			want:    "docker.io/k0sproject/k0s:v",
+			want:    "",
 		},
 	}
 
@@ -83,6 +83,10 @@ func TestResourceSchema(t *testing.T) {
 		{name: "kubeconfig", computed: true, sensitive: true},
 		{name: "kubeconfig_path", optional: true},
 		{name: "wait_for_ready", optional: true, computed: true},
+		{name: "ports", optional: true},
+		{name: "volumes", optional: true},
+		{name: "tmpfs", optional: true},
+		{name: "env", optional: true},
 		{name: "endpoint", computed: true},
 		{name: "client_certificate", computed: true, sensitive: true},
 		{name: "client_key", computed: true, sensitive: true},
@@ -141,8 +145,8 @@ func TestResourceSchemaAttributes(t *testing.T) {
 	r.Schema(context.Background(), req, &resp)
 
 	attrs := resp.Schema.Attributes
-	if len(attrs) != 14 {
-		t.Errorf("expected 14 attributes, got %d", len(attrs))
+	if len(attrs) != 18 {
+		t.Errorf("expected 18 attributes, got %d", len(attrs))
 	}
 
 	for name, attr := range attrs {

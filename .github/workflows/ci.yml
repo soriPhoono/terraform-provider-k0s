@@ -8,8 +8,8 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Build
@@ -17,4 +17,6 @@ jobs:
       - name: Vet
         run: CGO_ENABLED=0 go vet ./...
       - name: Unit tests
-        run: CGO_ENABLED=0 go test ./internal/provider/... -count=1
+        run: CGO_ENABLED=0 go test ./internal/provider/... -count=1 -run '^Test[^A]'
+      - name: Acceptance tests
+        run: TF_ACC=1 CGO_ENABLED=0 go test ./internal/provider/... -count=1 -timeout 20m

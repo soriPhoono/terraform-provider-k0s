@@ -43,6 +43,10 @@ type ClusterResourceModel struct {
 	Kubeconfig           types.String `tfsdk:"kubeconfig"`
 	KubeconfigPath       types.String `tfsdk:"kubeconfig_path"`
 	WaitForReady         types.Bool   `tfsdk:"wait_for_ready"`
+	Ports                types.List   `tfsdk:"ports"`
+	Volumes              types.List   `tfsdk:"volumes"`
+	Tmpfs                types.List   `tfsdk:"tmpfs"`
+	Env                  types.Map    `tfsdk:"env"`
 	Endpoint             types.String `tfsdk:"endpoint"`
 	ClientCertificate    types.String `tfsdk:"client_certificate"`
 	ClientKey            types.String `tfsdk:"client_key"`
@@ -53,11 +57,38 @@ type ClusterResourceModel struct {
 }
 
 func imageForVersion(version string) string {
+	if version == "" {
+		return ""
+	}
 	tag := strings.ReplaceAll(version, "+", "-")
 	if !strings.HasPrefix(tag, "v") {
 		tag = "v" + tag
 	}
 	return "docker.io/k0sproject/k0s:" + tag
+}
+
+func expandStringList(v types.List) []string {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	elems := v.Elements()
+	r := make([]string, len(elems))
+	for i, e := range elems {
+		r[i] = e.(types.String).ValueString()
+	}
+	return r
+}
+
+func expandStringMap(v types.Map) map[string]string {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	elems := v.Elements()
+	r := make(map[string]string, len(elems))
+	for k, e := range elems {
+		r[k] = e.(types.String).ValueString()
+	}
+	return r
 }
 
 func controllerName(cluster string, idx int) string {
@@ -133,6 +164,29 @@ func (r *ClusterResource) Schema(
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
+			},
+			"ports": schema.ListAttribute{
+				MarkdownDescription: "Container port mappings (e.g. [\"6443:6443\"]). " +
+					"Defaults to auto-assigned host ports when not set.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"volumes": schema.ListAttribute{
+				MarkdownDescription: "Container volume mounts (e.g. [\"/host/path:/container/path\"]). " +
+					"Defaults to [\"/var/lib/k0s\"] when not set.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"tmpfs": schema.ListAttribute{
+				MarkdownDescription: "Container tmpfs mounts (e.g. [\"/run\"]). " +
+					"Defaults to [\"/run\"] when not set.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"env": schema.MapAttribute{
+				MarkdownDescription: "Environment variables to set in the container.",
+				Optional:            true,
+				ElementType:         types.StringType,
 			},
 			"endpoint": schema.StringAttribute{
 				MarkdownDescription: "Kubernetes API server endpoint.",
@@ -223,10 +277,12 @@ func (r *ClusterResource) Create(
 		image = imageForVersion(data.Version.ValueString())
 	}
 
+	waitForReady := data.WaitForReady.ValueBool()
+
 	if data.SingleNode.ValueBool() {
-		createSingleNode(ctx, docker, name, image, &data, resp)
+		createSingleNode(ctx, docker, name, image, waitForReady, &data, resp)
 	} else {
-		createMultiNode(ctx, docker, name, image, &data, resp)
+		createMultiNode(ctx, docker, name, image, waitForReady, &data, resp)
 	}
 	if resp.Diagnostics.HasError() {
 		return
@@ -356,6 +412,7 @@ func (r *ClusterResource) ImportState(
 		resp.State.SetAttribute(ctx, path.Root("single_node"), true)
 		resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(1))
 		resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(0))
+		resp.State.SetAttribute(ctx, path.Root("wait_for_ready"), true)
 		image, err := docker.inspectField(ctx, id, "{{.Config.Image}}")
 		if err == nil {
 			resp.State.SetAttribute(ctx, path.Root("image"), image)
@@ -397,6 +454,7 @@ func (r *ClusterResource) ImportState(
 	resp.State.SetAttribute(ctx, path.Root("single_node"), false)
 	resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(cc))
 	resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(wc))
+	resp.State.SetAttribute(ctx, path.Root("wait_for_ready"), true)
 	image, err := docker.inspectField(ctx, ctrlName, "{{.Config.Image}}")
 	if err == nil {
 		resp.State.SetAttribute(ctx, path.Root("image"), image)
@@ -410,16 +468,29 @@ func createSingleNode(
 	ctx context.Context,
 	docker *dockerClient,
 	name, image string,
+	waitForReady bool,
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
 	containerArgs := []string{"k0s", "controller", "--enable-worker"}
-	ports := []string{"6443:6443"}
+
+	ports := expandStringList(data.Ports)
+	if ports == nil {
+		ports = []string{"6443:6443"}
+	}
+	volumes := expandStringList(data.Volumes)
+	if volumes == nil {
+		volumes = []string{"/var/lib/k0s"}
+	}
+	tmpfs := expandStringList(data.Tmpfs)
+	if tmpfs == nil {
+		tmpfs = []string{"/run"}
+	}
+	env := expandStringMap(data.Env)
 
 	_, err := docker.createContainer(ctx,
 		name, name, image,
-		true, ports,
-		[]string{"/var/lib/k0s"}, []string{"/run"},
+		true, ports, volumes, tmpfs, env,
 		"",
 		containerArgs,
 	)
@@ -434,11 +505,16 @@ func createSingleNode(
 		return
 	}
 
-	kubeconfig, err := waitForReadiness(ctx, docker, name)
-	if err != nil {
-		_ = docker.removeContainer(ctx, name, true)
-		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
-		return
+	var kubeconfig string
+	if waitForReady {
+		kubeconfig, err = waitForReadiness(ctx, docker, name)
+		if err != nil {
+			_ = docker.removeContainer(ctx, name, true)
+			resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
+			return
+		}
+	} else {
+		kubeconfig, _ = docker.exec(ctx, name, "k0s", "kubeconfig", "admin")
 	}
 
 	data.Id = types.StringValue(name)
@@ -452,6 +528,7 @@ func createMultiNode(
 	ctx context.Context,
 	docker *dockerClient,
 	clusterName, image string,
+	waitForReady bool,
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
@@ -471,19 +548,34 @@ func createMultiNode(
 	cc := int(data.ControllerCount.ValueInt64())
 	wc := int(data.WorkerCount.ValueInt64())
 
+	userPorts := expandStringList(data.Ports)
+	volumes := expandStringList(data.Volumes)
+	if volumes == nil {
+		volumes = []string{"/var/lib/k0s"}
+	}
+	tmpfs := expandStringList(data.Tmpfs)
+	if tmpfs == nil {
+		tmpfs = []string{"/run"}
+	}
+	env := expandStringMap(data.Env)
+
 	// --- create controllers ---
 	for i := 1; i <= cc; i++ {
 		cName := controllerName(clusterName, i)
-		ports := []string{fmt.Sprintf("%d:6443", 6443+i-1)}
-		if i == 1 {
-			ports = append(ports, fmt.Sprintf("%d:9443", 9443+i-1))
+		var ports []string
+		if userPorts != nil {
+			ports = userPorts
+		} else {
+			ports = []string{fmt.Sprintf("%d:6443", 6443+i-1)}
+			if i == 1 {
+				ports = append(ports, fmt.Sprintf("%d:9443", 9443+i-1))
+			}
 		}
 
 		ctrlArgs := []string{"k0s", "controller"}
 		_, err := docker.createContainer(ctx,
 			cName, cName, image,
-			true, ports,
-			[]string{"/var/lib/k0s"}, []string{"/run"},
+			true, ports, volumes, tmpfs, env,
 			netName,
 			ctrlArgs,
 		)
@@ -501,60 +593,65 @@ func createMultiNode(
 
 	firstController := controllerName(clusterName, 1)
 
-	kubeconfig, err := waitForReadiness(ctx, docker, firstController)
-	if err != nil {
-		resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
-		return
-	}
+	var kubeconfig string
+	var err error
 
-	// --- generate worker token ---
-	token, err := docker.exec(ctx, firstController, "k0s", "token", "create", "--role=worker")
-	if err != nil {
-		resp.Diagnostics.AddError("Failed to generate worker join token", err.Error())
-		return
-	}
-	token = strings.TrimSpace(token)
-
-	tokenFile, err := os.CreateTemp("", "k0s-join-token-*")
-	if err != nil {
-		resp.Diagnostics.AddError("Failed to create temp token file", err.Error())
-		return
-	}
-	tokenPath := tokenFile.Name()
-	if _, err := tokenFile.WriteString(token); err != nil {
-		_ = tokenFile.Close()
-		_ = os.Remove(tokenPath)
-		resp.Diagnostics.AddError("Failed to write token file", err.Error())
-		return
-	}
-	_ = tokenFile.Close()
-	defer func() { _ = os.Remove(tokenPath) }()
-
-	// --- create workers ---
-	for i := 1; i <= wc; i++ {
-		wName := workerName(clusterName, i)
-		workerArgs := []string{
-			"k0s", "worker",
-			"--token-file", tokenPath,
-		}
-
-		_, err := docker.createContainer(ctx,
-			wName, wName, image,
-			true, nil,
-			[]string{"/var/lib/k0s", tokenPath + ":" + tokenPath},
-			[]string{"/run"},
-			netName,
-			workerArgs,
-		)
+	if waitForReady {
+		kubeconfig, err = waitForReadiness(ctx, docker, firstController)
 		if err != nil {
-			resp.Diagnostics.AddError(fmt.Sprintf("Failed to create %s", wName), err.Error())
+			resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
 			return
 		}
 
-		if err := docker.startContainer(ctx, wName); err != nil {
-			_ = docker.removeContainer(ctx, wName, true)
-			resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", wName), err.Error())
+		// --- generate worker token ---
+		token, err := docker.exec(ctx, firstController, "k0s", "token", "create", "--role=worker")
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to generate worker join token", err.Error())
 			return
+		}
+		token = strings.TrimSpace(token)
+
+		tokenFile, err := os.CreateTemp("", "k0s-join-token-*")
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to create temp token file", err.Error())
+			return
+		}
+		tokenPath := tokenFile.Name()
+		if _, err := tokenFile.WriteString(token); err != nil {
+			_ = tokenFile.Close()
+			_ = os.Remove(tokenPath)
+			resp.Diagnostics.AddError("Failed to write token file", err.Error())
+			return
+		}
+		_ = tokenFile.Close()
+		defer func() { _ = os.Remove(tokenPath) }()
+
+		// --- create workers ---
+		for i := 1; i <= wc; i++ {
+			wName := workerName(clusterName, i)
+			workerArgs := []string{
+				"k0s", "worker",
+				"--token-file", tokenPath,
+			}
+
+			workerVolumes := append(append([]string{}, volumes...), tokenPath+":"+tokenPath)
+
+			_, err := docker.createContainer(ctx,
+				wName, wName, image,
+				true, userPorts, workerVolumes, tmpfs, env,
+				netName,
+				workerArgs,
+			)
+			if err != nil {
+				resp.Diagnostics.AddError(fmt.Sprintf("Failed to create %s", wName), err.Error())
+				return
+			}
+
+			if err := docker.startContainer(ctx, wName); err != nil {
+				_ = docker.removeContainer(ctx, wName, true)
+				resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", wName), err.Error())
+				return
+			}
 		}
 	}
 
@@ -567,23 +664,23 @@ func createMultiNode(
 // --- kubeconfig helpers ---------------------------------------------------
 
 func setKubeconfigOutputs(data *ClusterResourceModel) {
+	ep := ""
+	ca := ""
+	cert := ""
+	key := ""
+
 	kcfg, err := parseKubeconfig(data.Kubeconfig.ValueString())
-	if err != nil {
-		// Not a hard error — the raw kubeconfig is still available.
-		return
+	if err == nil {
+		ep = kcfg.Endpoint
+		ca = kcfg.ClusterCACertificate
+		cert = kcfg.ClientCertificate
+		key = kcfg.ClientKey
 	}
-	if kcfg.Endpoint != "" {
-		data.Endpoint = types.StringValue(kcfg.Endpoint)
-	}
-	if kcfg.ClusterCACertificate != "" {
-		data.ClusterCACertificate = types.StringValue(kcfg.ClusterCACertificate)
-	}
-	if kcfg.ClientCertificate != "" {
-		data.ClientCertificate = types.StringValue(kcfg.ClientCertificate)
-	}
-	if kcfg.ClientKey != "" {
-		data.ClientKey = types.StringValue(kcfg.ClientKey)
-	}
+
+	data.Endpoint = types.StringValue(ep)
+	data.ClusterCACertificate = types.StringValue(ca)
+	data.ClientCertificate = types.StringValue(cert)
+	data.ClientKey = types.StringValue(key)
 }
 
 // --- readiness -------------------------------------------------------------

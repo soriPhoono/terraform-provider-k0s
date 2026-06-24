@@ -116,22 +116,36 @@ func (d *ClusterDataSource) Read(
 		resp.Diagnostics.AddError("Failed to inspect container", err.Error())
 		return
 	}
+
+	containerName := name
+	singleNode := true
+
 	if !running {
-		resp.Diagnostics.AddError("Cluster not found or not running",
-			fmt.Sprintf("No running container named %q was found.", name))
-		return
+		ctrlName := controllerName(name, 1)
+		running, err = docker.isRunning(ctx, ctrlName)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to inspect controller container", err.Error())
+			return
+		}
+		if !running {
+			resp.Diagnostics.AddError("Cluster not found or not running",
+				fmt.Sprintf("No running container found for %q.", name))
+			return
+		}
+		containerName = ctrlName
+		singleNode = false
 	}
 
-	image, err := docker.inspectField(ctx, name, "{{.Config.Image}}")
+	image, err := docker.inspectField(ctx, containerName, "{{.Config.Image}}")
 	if err != nil {
 		resp.Diagnostics.AddWarning("Could not read image", err.Error())
 	}
-	status, err := docker.inspectField(ctx, name, "{{.State.Status}}")
+	status, err := docker.inspectField(ctx, containerName, "{{.State.Status}}")
 	if err != nil {
 		resp.Diagnostics.AddWarning("Could not read status", err.Error())
 	}
 
-	kubeconfig, err := docker.exec(ctx, name, "k0s", "kubeconfig", "admin")
+	kubeconfig, err := docker.exec(ctx, containerName, "k0s", "kubeconfig", "admin")
 	if err != nil {
 		resp.Diagnostics.AddWarning("Could not read kubeconfig", err.Error())
 	}
@@ -141,7 +155,7 @@ func (d *ClusterDataSource) Read(
 	data.Status = types.StringValue(status)
 	data.Kubeconfig = types.StringValue(kubeconfig)
 	data.Version = types.StringValue(extractVersionFromImage(image))
-	data.SingleNode = types.BoolValue(false)
+	data.SingleNode = types.BoolValue(singleNode)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
