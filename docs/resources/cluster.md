@@ -34,10 +34,20 @@ output "kubeconfig" {
 ### Optional
 
 - `controller_count` (Number) Number of controller nodes (only used when single_node is false).
+- `cpu` (String) CPU limit for the container (e.g. "0.5", "2"). Maps to Docker --cpus.
+- `env` (Map of String) Environment variables to set in the container.
+- `extra_args` (List of String) Extra CLI arguments to pass to the k0s command (e.g. ["--kubelet-extra-flags", "--fail-swap-on=false"]).
 - `image` (String) Full OCI image reference. Computed from version if not set.
 - `kubeconfig_path` (String) Path to write the kubeconfig file on the local filesystem.
+- `memory` (String) Memory limit for the container (e.g. "512m", "2g"). Maps to Docker --memory.
+- `network` (String) Docker network to use for the cluster containers. When set, the network must already exist and will not be removed on destroy. When unset in multi-node mode, a network is auto-created as k0s-{name}.
+- `ports` (List of String) Container port mappings (e.g. ["6443:6443"]). Defaults to auto-assigned host ports when not set.
+- `readiness_timeout` (String) Maximum time to wait for the cluster control plane to become ready (e.g. "30s", "5m"). Defaults to "120s".
 - `single_node` (Boolean) Run a single-node cluster (controller + worker in one container). When false, separate controller and worker containers are created.
+- `timeouts` (Attributes) (see [below for nested schema](#nestedatt--timeouts))
+- `tmpfs` (List of String) Container tmpfs mounts (e.g. ["/run"]). Defaults to ["/run"] when not set.
 - `version` (String) k0s version (e.g. v1.31.0+k0s.0).
+- `volumes` (List of String) Container volume mounts (e.g. ["/host/path:/container/path"]). Defaults to ["/var/lib/k0s"] when not set.
 - `wait_for_ready` (Boolean) Wait for the cluster control plane to be ready before returning.
 - `worker_count` (Number) Number of worker nodes (only used when single_node is false).
 
@@ -49,6 +59,16 @@ output "kubeconfig" {
 - `endpoint` (String) Kubernetes API server endpoint.
 - `id` (String) Cluster identifier (the cluster name).
 - `kubeconfig` (String, Sensitive) Kubeconfig contents for accessing the cluster.
+
+<a id="nestedatt--timeouts"></a>
+
+### Nested Schema for `timeouts`
+
+Optional:
+
+- `create` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours).
+- `delete` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours). Setting a timeout for a Delete operation is only applicable if changes are saved into state before the destroy operation occurs.
+- `read` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours). Read operations occur during any refresh or planning operation when refresh is enabled.
 
 ## Import
 

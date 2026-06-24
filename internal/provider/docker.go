@@ -139,3 +139,29 @@ func (d *dockerClient) removeNetwork(ctx context.Context, name string) error {
 	_, err := d.run(ctx, "network", "rm", name)
 	return err
 }
+
+//nolint:unused
+func (d *dockerClient) imagePull(ctx context.Context, image string) error {
+	_, err := d.run(ctx, "pull", image)
+	return err
+}
+
+//nolint:unused
+func (d *dockerClient) listContainers(ctx context.Context, filters ...string) ([]string, error) {
+	args := []string{"ps", "-a", "--format", "{{.Names}}"}
+	for _, f := range filters {
+		args = append(args, "--filter", f)
+	}
+	out, err := d.run(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return []string{}, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+func (d *dockerClient) logs(ctx context.Context, container string, tail int) (string, error) {
+	return d.run(ctx, "logs", "--tail", fmt.Sprintf("%d", tail), container)
+}

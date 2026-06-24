@@ -26,7 +26,12 @@ output "versions" {
 
 ## Schema
 
+### Optional
+
+- `include_prerelease` (Boolean) Include pre-release versions in the results. Defaults to false.
+- `per_page` (Number) Number of releases to fetch from GitHub (max 100). Defaults to 10.
+
 ### Read-Only
 
-- `latest` (String) Latest stable k0s version.
-- `versions` (List of String) List of available k0s version strings (stable releases only).
+- `latest` (String) Latest k0s version (latest stable, or latest prerelease if include_prerelease=true).
+- `versions` (List of String) List of available k0s version strings.

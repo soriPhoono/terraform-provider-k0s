@@ -14,7 +14,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-const versionsGHURL = "https://api.github.com/repos/k0sproject/k0s/releases?per_page=10"
+const versionsGHBaseURL = "https://api.github.com/repos/k0sproject/k0s/releases"
+const maxPerPage = 100
 const versionsHTTPTimeout = 15 * time.Second
 
 var _ datasource.DataSource = &VersionsDataSource{}
@@ -26,8 +27,10 @@ func NewVersionsDataSource() datasource.DataSource {
 type VersionsDataSource struct{}
 
 type VersionsDataSourceModel struct {
-	Versions types.List   `tfsdk:"versions"`
-	Latest   types.String `tfsdk:"latest"`
+	PerPage           types.Int64  `tfsdk:"per_page"`
+	IncludePrerelease types.Bool   `tfsdk:"include_prerelease"`
+	Versions          types.List   `tfsdk:"versions"`
+	Latest            types.String `tfsdk:"latest"`
 }
 
 // ghRelease is a minimal representation of a GitHub release.
@@ -53,14 +56,24 @@ func (d *VersionsDataSource) Schema(
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Query available k0s versions from GitHub releases.",
 		Attributes: map[string]schema.Attribute{
+			"per_page": schema.Int64Attribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Number of releases to fetch from GitHub (max 100). Defaults to 10.",
+			},
+			"include_prerelease": schema.BoolAttribute{
+				Optional:            true,
+				Computed:            true,
+				MarkdownDescription: "Include pre-release versions in the results. Defaults to false.",
+			},
 			"versions": schema.ListAttribute{
 				Computed:            true,
 				ElementType:         types.StringType,
-				MarkdownDescription: "List of available k0s version strings (stable releases only).",
+				MarkdownDescription: "List of available k0s version strings.",
 			},
 			"latest": schema.StringAttribute{
 				Computed:            true,
-				MarkdownDescription: "Latest stable k0s version.",
+				MarkdownDescription: "Latest k0s version (latest stable, or latest prerelease if include_prerelease=true).",
 			},
 		},
 	}
@@ -84,7 +97,10 @@ func (d *VersionsDataSource) Read(
 		return
 	}
 
-	versions, err := fetchK0sVersions(ctx)
+	perPage := int(data.PerPage.ValueInt64())
+	includePrerelease := data.IncludePrerelease.ValueBool()
+
+	versions, err := fetchK0sVersions(ctx, perPage, includePrerelease)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Failed to fetch k0s versions",
@@ -117,8 +133,16 @@ func (d *VersionsDataSource) Read(
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
-func fetchK0sVersions(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, versionsGHURL, nil)
+func fetchK0sVersions(ctx context.Context, perPage int, includePrerelease bool) ([]string, error) {
+	if perPage < 1 {
+		perPage = 10
+	}
+	if perPage > maxPerPage {
+		perPage = maxPerPage
+	}
+
+	url := fmt.Sprintf("%s?per_page=%d", versionsGHBaseURL, perPage)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
 	}
@@ -142,7 +166,7 @@ func fetchK0sVersions(ctx context.Context) ([]string, error) {
 
 	var versions []string
 	for _, r := range releases {
-		if r.Draft || r.Prerelease {
+		if r.Draft || (!includePrerelease && r.Prerelease) {
 			continue
 		}
 		version := strings.TrimPrefix(r.TagName, "v")
