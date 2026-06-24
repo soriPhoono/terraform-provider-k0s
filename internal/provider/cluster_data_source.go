@@ -138,16 +138,19 @@ func (d *ClusterDataSource) Read(
 
 	image, err := docker.inspectField(ctx, containerName, "{{.Config.Image}}")
 	if err != nil {
-		resp.Diagnostics.AddWarning("Could not read image", err.Error())
+		resp.Diagnostics.AddError("Could not read image", err.Error())
+		return
 	}
 	status, err := docker.inspectField(ctx, containerName, "{{.State.Status}}")
 	if err != nil {
-		resp.Diagnostics.AddWarning("Could not read status", err.Error())
+		resp.Diagnostics.AddError("Could not read status", err.Error())
+		return
 	}
 
 	kubeconfig, err := docker.exec(ctx, containerName, "k0s", "kubeconfig", "admin")
 	if err != nil {
-		resp.Diagnostics.AddWarning("Could not read kubeconfig", err.Error())
+		resp.Diagnostics.AddError("Could not read kubeconfig", err.Error())
+		return
 	}
 
 	data.Id = types.StringValue(name)
