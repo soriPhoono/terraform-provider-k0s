@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -24,7 +25,6 @@ import (
 )
 
 const defaultK0sVersion = "v1.35.1-k0s.1"
-const clusterReadyTimeout = 120 * time.Second
 const readinessPollInterval = 2 * time.Second
 
 var dockerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
@@ -101,27 +101,30 @@ type ClusterResource struct {
 }
 
 type ClusterResourceModel struct {
-	Id                   types.String `tfsdk:"id"`
-	Name                 types.String `tfsdk:"name"`
-	Version              types.String `tfsdk:"version"`
-	Image                types.String `tfsdk:"image"`
-	Kubeconfig           types.String `tfsdk:"kubeconfig"`
-	KubeconfigPath       types.String `tfsdk:"kubeconfig_path"`
-	WaitForReady         types.Bool   `tfsdk:"wait_for_ready"`
-	Ports                types.List   `tfsdk:"ports"`
-	Volumes              types.List   `tfsdk:"volumes"`
-	Tmpfs                types.List   `tfsdk:"tmpfs"`
-	Env                  types.Map    `tfsdk:"env"`
-	ExtraArgs            types.List   `tfsdk:"extra_args"`
-	Cpu                  types.String `tfsdk:"cpu"`
-	Memory               types.String `tfsdk:"memory"`
-	Endpoint             types.String `tfsdk:"endpoint"`
-	ClientCertificate    types.String `tfsdk:"client_certificate"`
-	ClientKey            types.String `tfsdk:"client_key"`
-	ClusterCACertificate types.String `tfsdk:"cluster_ca_certificate"`
-	SingleNode           types.Bool   `tfsdk:"single_node"`
-	ControllerCount      types.Int64  `tfsdk:"controller_count"`
-	WorkerCount          types.Int64  `tfsdk:"worker_count"`
+	Id                   types.String   `tfsdk:"id"`
+	Name                 types.String   `tfsdk:"name"`
+	Version              types.String   `tfsdk:"version"`
+	Image                types.String   `tfsdk:"image"`
+	Kubeconfig           types.String   `tfsdk:"kubeconfig"`
+	KubeconfigPath       types.String   `tfsdk:"kubeconfig_path"`
+	WaitForReady         types.Bool     `tfsdk:"wait_for_ready"`
+	Ports                types.List     `tfsdk:"ports"`
+	Volumes              types.List     `tfsdk:"volumes"`
+	Tmpfs                types.List     `tfsdk:"tmpfs"`
+	Env                  types.Map      `tfsdk:"env"`
+	ExtraArgs            types.List     `tfsdk:"extra_args"`
+	Cpu                  types.String   `tfsdk:"cpu"`
+	Memory               types.String   `tfsdk:"memory"`
+	ReadinessTimeout     types.String   `tfsdk:"readiness_timeout"`
+	Network              types.String   `tfsdk:"network"`
+	Timeouts             timeouts.Value `tfsdk:"timeouts"`
+	Endpoint             types.String   `tfsdk:"endpoint"`
+	ClientCertificate    types.String   `tfsdk:"client_certificate"`
+	ClientKey            types.String   `tfsdk:"client_key"`
+	ClusterCACertificate types.String   `tfsdk:"cluster_ca_certificate"`
+	SingleNode           types.Bool     `tfsdk:"single_node"`
+	ControllerCount      types.Int64    `tfsdk:"controller_count"`
+	WorkerCount          types.Int64    `tfsdk:"worker_count"`
 }
 
 func imageForVersion(version string) string {
@@ -275,6 +278,27 @@ func (r *ClusterResource) Schema(
 					"Maps to Docker --memory.",
 				Optional: true,
 			},
+			"readiness_timeout": schema.StringAttribute{
+				MarkdownDescription: "Maximum time to wait for the cluster control plane to become ready " +
+					"(e.g. \"30s\", \"5m\"). Defaults to \"120s\".",
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString("120s"),
+			},
+			"network": schema.StringAttribute{
+				MarkdownDescription: "Docker network to use for the cluster containers. " +
+					"When set, the network must already exist and will not be removed on destroy. " +
+					"When unset in multi-node mode, a network is auto-created as k0s-{name}.",
+				Optional: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+				Create: true,
+				Read:   true,
+				Delete: true,
+			}),
 			"endpoint": schema.StringAttribute{
 				MarkdownDescription: "Kubernetes API server endpoint.",
 				Computed:            true,
@@ -372,10 +396,19 @@ func (r *ClusterResource) Create(
 
 	waitForReady := data.WaitForReady.ValueBool()
 
+	readinessTimeout, diags := data.Timeouts.Create(ctx, 120*time.Second)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if customTimeout, err := time.ParseDuration(data.ReadinessTimeout.ValueString()); err == nil {
+		readinessTimeout = customTimeout
+	}
+
 	if data.SingleNode.ValueBool() {
-		createSingleNode(ctx, docker, name, image, waitForReady, &data, resp)
+		createSingleNode(ctx, docker, name, image, waitForReady, readinessTimeout, &data, resp)
 	} else {
-		createMultiNode(ctx, docker, name, image, waitForReady, &data, resp)
+		createMultiNode(ctx, docker, name, image, waitForReady, readinessTimeout, &data, resp)
 	}
 	if resp.Diagnostics.HasError() {
 		return
@@ -405,6 +438,14 @@ func (r *ClusterResource) Read(
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	readTimeout, diags := data.Timeouts.Read(ctx, 5*time.Minute)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
 
 	docker := newDockerClient(r.binaryPath)
 	clusterName := data.Id.ValueString()
@@ -469,6 +510,14 @@ func (r *ClusterResource) Delete(
 		return
 	}
 
+	deleteTimeout, diags := data.Timeouts.Delete(ctx, 10*time.Minute)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
+
 	clusterName := data.Id.ValueString()
 	docker := newDockerClient(r.binaryPath)
 
@@ -491,8 +540,10 @@ func (r *ClusterResource) Delete(
 				resp.Diagnostics.AddWarning("Failed to remove controller container", err.Error())
 			}
 		}
-		if err := docker.removeNetwork(ctx, networkName(clusterName)); err != nil {
-			resp.Diagnostics.AddWarning("Failed to remove network", err.Error())
+		if data.Network.ValueString() == "" {
+			if err := docker.removeNetwork(ctx, networkName(clusterName)); err != nil {
+				resp.Diagnostics.AddWarning("Failed to remove network", err.Error())
+			}
 		}
 	}
 }
@@ -518,6 +569,7 @@ func (r *ClusterResource) ImportState(
 		resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(1))
 		resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(0))
 		resp.State.SetAttribute(ctx, path.Root("wait_for_ready"), true)
+		resp.State.SetAttribute(ctx, path.Root("readiness_timeout"), "120s")
 		image, err := docker.inspectField(ctx, id, "{{.Config.Image}}")
 		if err == nil {
 			resp.State.SetAttribute(ctx, path.Root("image"), image)
@@ -560,6 +612,7 @@ func (r *ClusterResource) ImportState(
 	resp.State.SetAttribute(ctx, path.Root("controller_count"), int64(cc))
 	resp.State.SetAttribute(ctx, path.Root("worker_count"), int64(wc))
 	resp.State.SetAttribute(ctx, path.Root("wait_for_ready"), true)
+	resp.State.SetAttribute(ctx, path.Root("readiness_timeout"), "120s")
 	image, err := docker.inspectField(ctx, ctrlName, "{{.Config.Image}}")
 	if err == nil {
 		resp.State.SetAttribute(ctx, path.Root("image"), image)
@@ -574,6 +627,7 @@ func createSingleNode(
 	docker *dockerClient,
 	name, image string,
 	waitForReady bool,
+	readinessTimeout time.Duration,
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
@@ -597,12 +651,13 @@ func createSingleNode(
 	env := expandStringMap(data.Env)
 	cpus := data.Cpu.ValueString()
 	memory := data.Memory.ValueString()
+	network := data.Network.ValueString()
 
 	_, err := docker.createContainer(ctx,
 		name, name, image,
 		true, ports, volumes, tmpfs, env,
 		cpus, memory,
-		"",
+		network,
 		containerArgs,
 	)
 	if err != nil {
@@ -623,7 +678,7 @@ func createSingleNode(
 
 	var kubeconfig string
 	if waitForReady {
-		kubeconfig, err = waitForReadiness(ctx, docker, name)
+		kubeconfig, err = waitForReadiness(ctx, docker, name, readinessTimeout)
 		if err != nil {
 			if rerr := docker.removeContainer(ctx, name, true); rerr != nil {
 				resp.Diagnostics.AddWarning(
@@ -650,16 +705,23 @@ func createMultiNode(
 	docker *dockerClient,
 	clusterName, image string,
 	waitForReady bool,
+	readinessTimeout time.Duration,
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
-	netName := networkName(clusterName)
+	cpus := data.Cpu.ValueString()
+	memory := data.Memory.ValueString()
+	network := data.Network.ValueString()
 
-	if _, err := docker.createNetwork(ctx, netName); err != nil {
-		resp.Diagnostics.AddError("Failed to create network", err.Error())
-		return
+	netName := network
+	if netName == "" {
+		netName = networkName(clusterName)
+		if _, err := docker.createNetwork(ctx, netName); err != nil {
+			resp.Diagnostics.AddError("Failed to create network", err.Error())
+			return
+		}
 	}
-	removeNet := true
+	removeNet := network == ""
 	defer func() {
 		if removeNet {
 			if err := docker.removeNetwork(ctx, netName); err != nil {
@@ -682,8 +744,6 @@ func createMultiNode(
 	}
 	env := expandStringMap(data.Env)
 	extraArgs := expandStringList(data.ExtraArgs)
-	cpus := data.Cpu.ValueString()
-	memory := data.Memory.ValueString()
 
 	// --- create controllers ---
 	for i := 1; i <= cc; i++ {
@@ -729,7 +789,7 @@ func createMultiNode(
 	var err error
 
 	if waitForReady {
-		kubeconfig, err = waitForReadiness(ctx, docker, firstController)
+		kubeconfig, err = waitForReadiness(ctx, docker, firstController, readinessTimeout)
 		if err != nil {
 			resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
 			return
@@ -825,8 +885,13 @@ func setKubeconfigOutputs(data *ClusterResourceModel, diags *diag.Diagnostics) {
 
 // --- readiness -------------------------------------------------------------
 
-func waitForReadiness(ctx context.Context, docker *dockerClient, name string) (string, error) {
-	deadline := time.Now().Add(clusterReadyTimeout)
+func waitForReadiness(
+	ctx context.Context,
+	docker *dockerClient,
+	name string,
+	timeout time.Duration,
+) (string, error) {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -843,6 +908,6 @@ func waitForReadiness(ctx context.Context, docker *dockerClient, name string) (s
 	}
 	return "", fmt.Errorf(
 		"timed out after %v waiting for cluster to become ready",
-		clusterReadyTimeout,
+		timeout,
 	)
 }
