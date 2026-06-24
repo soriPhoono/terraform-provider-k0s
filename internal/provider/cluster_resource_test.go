@@ -90,6 +90,9 @@ func TestResourceSchema(t *testing.T) {
 		{name: "extra_args", optional: true},
 		{name: "cpu", optional: true},
 		{name: "memory", optional: true},
+		{name: "readiness_timeout", optional: true, computed: true},
+		{name: "network", optional: true},
+		{name: "timeouts", optional: true},
 		{name: "endpoint", computed: true},
 		{name: "client_certificate", computed: true, sensitive: true},
 		{name: "client_key", computed: true, sensitive: true},
@@ -148,8 +151,8 @@ func TestResourceSchemaAttributes(t *testing.T) {
 	r.Schema(context.Background(), req, &resp)
 
 	attrs := resp.Schema.Attributes
-	if len(attrs) != 21 {
-		t.Errorf("expected 21 attributes, got %d", len(attrs))
+	if len(attrs) != 24 {
+		t.Errorf("expected 24 attributes, got %d", len(attrs))
 	}
 
 	for name, attr := range attrs {
