@@ -51,6 +51,7 @@ func (d *dockerClient) createContainer(
 	privileged bool,
 	ports, volumes, tmpfs []string,
 	env map[string]string,
+	cpus, memory string,
 	network string,
 	cmdArgs []string,
 ) (string, error) {
@@ -75,6 +76,12 @@ func (d *dockerClient) createContainer(
 	}
 	for k, v := range env {
 		args = append(args, "-e", k+"="+v)
+	}
+	if cpus != "" {
+		args = append(args, "--cpus", cpus)
+	}
+	if memory != "" {
+		args = append(args, "--memory", memory)
 	}
 	if network != "" {
 		args = append(args, "--network", network)

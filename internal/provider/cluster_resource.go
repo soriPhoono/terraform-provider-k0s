@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -17,12 +19,75 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 const defaultK0sVersion = "v1.35.1-k0s.1"
 const clusterReadyTimeout = 120 * time.Second
 const readinessPollInterval = 2 * time.Second
+
+var dockerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+type dockerNameValidator struct{}
+
+func (v dockerNameValidator) Description(_ context.Context) string {
+	return "must be a valid Docker container name"
+}
+
+func (v dockerNameValidator) MarkdownDescription(_ context.Context) string {
+	return "must be at most 128 characters and match `[a-zA-Z0-9][a-zA-Z0-9_.-]*`"
+}
+
+func (v dockerNameValidator) ValidateString(
+	_ context.Context,
+	req validator.StringRequest,
+	resp *validator.StringResponse,
+) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	name := req.ConfigValue.ValueString()
+	if len(name) > 128 || !dockerNameRe.MatchString(name) {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid container name",
+			fmt.Sprintf(
+				"Container name %q must be at most 128 characters and match [a-zA-Z0-9][a-zA-Z0-9_.-]*",
+				name,
+			),
+		)
+	}
+}
+
+type atLeastInt64Validator struct {
+	min int64
+}
+
+func (v atLeastInt64Validator) Description(_ context.Context) string {
+	return fmt.Sprintf("value must be at least %d", v.min)
+}
+
+func (v atLeastInt64Validator) MarkdownDescription(_ context.Context) string {
+	return fmt.Sprintf("value must be at least `%d`", v.min)
+}
+
+func (v atLeastInt64Validator) ValidateInt64(
+	_ context.Context,
+	req validator.Int64Request,
+	resp *validator.Int64Response,
+) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if req.ConfigValue.ValueInt64() < v.min {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid value",
+			fmt.Sprintf("Value must be at least %d, got %d", v.min, req.ConfigValue.ValueInt64()),
+		)
+	}
+}
 
 var _ resource.Resource = &ClusterResource{}
 var _ resource.ResourceWithImportState = &ClusterResource{}
@@ -47,6 +112,9 @@ type ClusterResourceModel struct {
 	Volumes              types.List   `tfsdk:"volumes"`
 	Tmpfs                types.List   `tfsdk:"tmpfs"`
 	Env                  types.Map    `tfsdk:"env"`
+	ExtraArgs            types.List   `tfsdk:"extra_args"`
+	Cpu                  types.String `tfsdk:"cpu"`
+	Memory               types.String `tfsdk:"memory"`
 	Endpoint             types.String `tfsdk:"endpoint"`
 	ClientCertificate    types.String `tfsdk:"client_certificate"`
 	ClientKey            types.String `tfsdk:"client_key"`
@@ -129,6 +197,9 @@ func (r *ClusterResource) Schema(
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Cluster name; used to name containers and the Docker network.",
 				Required:            true,
+				Validators: []validator.String{
+					dockerNameValidator{},
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
@@ -188,6 +259,22 @@ func (r *ClusterResource) Schema(
 				Optional:            true,
 				ElementType:         types.StringType,
 			},
+			"extra_args": schema.ListAttribute{
+				MarkdownDescription: "Extra CLI arguments to pass to the k0s command " +
+					"(e.g. [\"--kubelet-extra-flags\", \"--fail-swap-on=false\"]).",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"cpu": schema.StringAttribute{
+				MarkdownDescription: "CPU limit for the container (e.g. \"0.5\", \"2\"). " +
+					"Maps to Docker --cpus.",
+				Optional: true,
+			},
+			"memory": schema.StringAttribute{
+				MarkdownDescription: "Memory limit for the container (e.g. \"512m\", \"2g\"). " +
+					"Maps to Docker --memory.",
+				Optional: true,
+			},
 			"endpoint": schema.StringAttribute{
 				MarkdownDescription: "Kubernetes API server endpoint.",
 				Computed:            true,
@@ -222,6 +309,9 @@ func (r *ClusterResource) Schema(
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(1),
+				Validators: []validator.Int64{
+					atLeastInt64Validator{min: 1},
+				},
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.RequiresReplace(),
 				},
@@ -231,6 +321,9 @@ func (r *ClusterResource) Schema(
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(0),
+				Validators: []validator.Int64{
+					atLeastInt64Validator{min: 0},
+				},
 				PlanModifiers: []planmodifier.Int64{
 					int64planmodifier.RequiresReplace(),
 				},
@@ -288,7 +381,7 @@ func (r *ClusterResource) Create(
 		return
 	}
 
-	setKubeconfigOutputs(&data)
+	setKubeconfigOutputs(&data, &resp.Diagnostics)
 
 	if data.KubeconfigPath.ValueString() != "" {
 		if err := writeKubeconfigFile(
@@ -330,7 +423,7 @@ func (r *ClusterResource) Read(
 		if err == nil {
 			data.Kubeconfig = types.StringValue(kubeconfig)
 		}
-		setKubeconfigOutputs(&data)
+		setKubeconfigOutputs(&data, &resp.Diagnostics)
 	} else {
 		ctrlName := controllerName(clusterName, 1)
 		running, err := docker.isRunning(ctx, ctrlName)
@@ -346,7 +439,7 @@ func (r *ClusterResource) Read(
 		if err == nil {
 			data.Kubeconfig = types.StringValue(kubeconfig)
 		}
-		setKubeconfigOutputs(&data)
+		setKubeconfigOutputs(&data, &resp.Diagnostics)
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -380,15 +473,27 @@ func (r *ClusterResource) Delete(
 	docker := newDockerClient(r.binaryPath)
 
 	if data.SingleNode.ValueBool() {
-		_ = docker.removeContainer(ctx, clusterName, true)
+		if err := docker.removeContainer(ctx, clusterName, true); err != nil {
+			resp.Diagnostics.AddWarning("Failed to remove container", err.Error())
+		}
 	} else {
 		for i := 1; i <= int(data.WorkerCount.ValueInt64()); i++ {
-			_ = docker.removeContainer(ctx, workerName(clusterName, i), true)
+			if err := docker.removeContainer(ctx, workerName(clusterName, i), true); err != nil {
+				resp.Diagnostics.AddWarning("Failed to remove worker container", err.Error())
+			}
 		}
 		for i := 1; i <= int(data.ControllerCount.ValueInt64()); i++ {
-			_ = docker.removeContainer(ctx, controllerName(clusterName, i), true)
+			if err := docker.removeContainer(
+				ctx,
+				controllerName(clusterName, i),
+				true,
+			); err != nil {
+				resp.Diagnostics.AddWarning("Failed to remove controller container", err.Error())
+			}
 		}
-		_ = docker.removeNetwork(ctx, networkName(clusterName))
+		if err := docker.removeNetwork(ctx, networkName(clusterName)); err != nil {
+			resp.Diagnostics.AddWarning("Failed to remove network", err.Error())
+		}
 	}
 }
 
@@ -472,7 +577,10 @@ func createSingleNode(
 	data *ClusterResourceModel,
 	resp *resource.CreateResponse,
 ) {
-	containerArgs := []string{"k0s", "controller", "--enable-worker"}
+	containerArgs := append(
+		[]string{"k0s", "controller", "--enable-worker"},
+		expandStringList(data.ExtraArgs)...,
+	)
 
 	ports := expandStringList(data.Ports)
 	if ports == nil {
@@ -487,10 +595,13 @@ func createSingleNode(
 		tmpfs = []string{"/run"}
 	}
 	env := expandStringMap(data.Env)
+	cpus := data.Cpu.ValueString()
+	memory := data.Memory.ValueString()
 
 	_, err := docker.createContainer(ctx,
 		name, name, image,
 		true, ports, volumes, tmpfs, env,
+		cpus, memory,
 		"",
 		containerArgs,
 	)
@@ -500,7 +611,12 @@ func createSingleNode(
 	}
 
 	if err := docker.startContainer(ctx, name); err != nil {
-		_ = docker.removeContainer(ctx, name, true)
+		if rerr := docker.removeContainer(ctx, name, true); rerr != nil {
+			resp.Diagnostics.AddWarning(
+				"Failed to remove container after start failure",
+				rerr.Error(),
+			)
+		}
 		resp.Diagnostics.AddError("Failed to start container", err.Error())
 		return
 	}
@@ -509,7 +625,12 @@ func createSingleNode(
 	if waitForReady {
 		kubeconfig, err = waitForReadiness(ctx, docker, name)
 		if err != nil {
-			_ = docker.removeContainer(ctx, name, true)
+			if rerr := docker.removeContainer(ctx, name, true); rerr != nil {
+				resp.Diagnostics.AddWarning(
+					"Failed to remove container after readiness timeout",
+					rerr.Error(),
+				)
+			}
 			resp.Diagnostics.AddError("Cluster did not become ready", err.Error())
 			return
 		}
@@ -541,7 +662,9 @@ func createMultiNode(
 	removeNet := true
 	defer func() {
 		if removeNet {
-			_ = docker.removeNetwork(ctx, netName)
+			if err := docker.removeNetwork(ctx, netName); err != nil {
+				resp.Diagnostics.AddWarning("Failed to remove network", err.Error())
+			}
 		}
 	}()
 
@@ -558,6 +681,9 @@ func createMultiNode(
 		tmpfs = []string{"/run"}
 	}
 	env := expandStringMap(data.Env)
+	extraArgs := expandStringList(data.ExtraArgs)
+	cpus := data.Cpu.ValueString()
+	memory := data.Memory.ValueString()
 
 	// --- create controllers ---
 	for i := 1; i <= cc; i++ {
@@ -572,10 +698,11 @@ func createMultiNode(
 			}
 		}
 
-		ctrlArgs := []string{"k0s", "controller"}
+		ctrlArgs := append([]string{"k0s", "controller"}, extraArgs...)
 		_, err := docker.createContainer(ctx,
 			cName, cName, image,
 			true, ports, volumes, tmpfs, env,
+			cpus, memory,
 			netName,
 			ctrlArgs,
 		)
@@ -585,7 +712,12 @@ func createMultiNode(
 		}
 
 		if err := docker.startContainer(ctx, cName); err != nil {
-			_ = docker.removeContainer(ctx, cName, true)
+			if rerr := docker.removeContainer(ctx, cName, true); rerr != nil {
+				resp.Diagnostics.AddWarning(
+					fmt.Sprintf("Failed to remove %s after start failure", cName),
+					rerr.Error(),
+				)
+			}
 			resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", cName), err.Error())
 			return
 		}
@@ -629,16 +761,17 @@ func createMultiNode(
 		// --- create workers ---
 		for i := 1; i <= wc; i++ {
 			wName := workerName(clusterName, i)
-			workerArgs := []string{
-				"k0s", "worker",
-				"--token-file", tokenPath,
-			}
+			workerArgs := append(
+				[]string{"k0s", "worker", "--token-file", tokenPath},
+				extraArgs...,
+			)
 
 			workerVolumes := append(append([]string{}, volumes...), tokenPath+":"+tokenPath)
 
 			_, err := docker.createContainer(ctx,
 				wName, wName, image,
 				true, userPorts, workerVolumes, tmpfs, env,
+				cpus, memory,
 				netName,
 				workerArgs,
 			)
@@ -648,7 +781,12 @@ func createMultiNode(
 			}
 
 			if err := docker.startContainer(ctx, wName); err != nil {
-				_ = docker.removeContainer(ctx, wName, true)
+				if rerr := docker.removeContainer(ctx, wName, true); rerr != nil {
+					resp.Diagnostics.AddWarning(
+						fmt.Sprintf("Failed to remove %s after start failure", wName),
+						rerr.Error(),
+					)
+				}
 				resp.Diagnostics.AddError(fmt.Sprintf("Failed to start %s", wName), err.Error())
 				return
 			}
@@ -663,7 +801,7 @@ func createMultiNode(
 
 // --- kubeconfig helpers ---------------------------------------------------
 
-func setKubeconfigOutputs(data *ClusterResourceModel) {
+func setKubeconfigOutputs(data *ClusterResourceModel, diags *diag.Diagnostics) {
 	ep := ""
 	ca := ""
 	cert := ""
@@ -675,6 +813,8 @@ func setKubeconfigOutputs(data *ClusterResourceModel) {
 		ca = kcfg.ClusterCACertificate
 		cert = kcfg.ClientCertificate
 		key = kcfg.ClientKey
+	} else {
+		diags.AddWarning("Could not parse kubeconfig", err.Error())
 	}
 
 	data.Endpoint = types.StringValue(ep)
