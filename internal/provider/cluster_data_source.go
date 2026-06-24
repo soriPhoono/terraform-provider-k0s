@@ -20,13 +20,17 @@ type ClusterDataSource struct {
 }
 
 type ClusterDataSourceModel struct {
-	Id         types.String `tfsdk:"id"`
-	Name       types.String `tfsdk:"name"`
-	Version    types.String `tfsdk:"version"`
-	Image      types.String `tfsdk:"image"`
-	Kubeconfig types.String `tfsdk:"kubeconfig"`
-	Status     types.String `tfsdk:"status"`
-	SingleNode types.Bool   `tfsdk:"single_node"`
+	Id                   types.String `tfsdk:"id"`
+	Name                 types.String `tfsdk:"name"`
+	Version              types.String `tfsdk:"version"`
+	Image                types.String `tfsdk:"image"`
+	Kubeconfig           types.String `tfsdk:"kubeconfig"`
+	Status               types.String `tfsdk:"status"`
+	SingleNode           types.Bool   `tfsdk:"single_node"`
+	Endpoint             types.String `tfsdk:"endpoint"`
+	ClientCertificate    types.String `tfsdk:"client_certificate"`
+	ClientKey            types.String `tfsdk:"client_key"`
+	ClusterCACertificate types.String `tfsdk:"cluster_ca_certificate"`
 }
 
 func (d *ClusterDataSource) Metadata(
@@ -73,6 +77,25 @@ func (d *ClusterDataSource) Schema(
 			"single_node": schema.BoolAttribute{
 				Computed:            true,
 				MarkdownDescription: "Whether the cluster was created as single-node.",
+			},
+			"endpoint": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Kubernetes API server endpoint.",
+			},
+			"client_certificate": schema.StringAttribute{
+				Computed:            true,
+				Sensitive:           true,
+				MarkdownDescription: "Client certificate for authenticating to the cluster.",
+			},
+			"client_key": schema.StringAttribute{
+				Computed:            true,
+				Sensitive:           true,
+				MarkdownDescription: "Client key for authenticating to the cluster.",
+			},
+			"cluster_ca_certificate": schema.StringAttribute{
+				Computed:            true,
+				Sensitive:           true,
+				MarkdownDescription: "CA certificate for verifying the API server.",
 			},
 		},
 	}
@@ -159,6 +182,13 @@ func (d *ClusterDataSource) Read(
 	data.Kubeconfig = types.StringValue(kubeconfig)
 	data.Version = types.StringValue(extractVersionFromImage(image))
 	data.SingleNode = types.BoolValue(singleNode)
+
+	if kcfg, err := parseKubeconfig(kubeconfig); err == nil {
+		data.Endpoint = types.StringValue(kcfg.Endpoint)
+		data.ClientCertificate = types.StringValue(kcfg.ClientCertificate)
+		data.ClientKey = types.StringValue(kcfg.ClientKey)
+		data.ClusterCACertificate = types.StringValue(kcfg.ClusterCACertificate)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }

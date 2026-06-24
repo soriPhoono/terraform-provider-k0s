@@ -41,6 +41,10 @@ output "kubeconfig" {
 
 ### Read-Only
 
+- `client_certificate` (String, Sensitive) Client certificate for authenticating to the cluster.
+- `client_key` (String, Sensitive) Client key for authenticating to the cluster.
+- `cluster_ca_certificate` (String, Sensitive) CA certificate for verifying the API server.
+- `endpoint` (String) Kubernetes API server endpoint.
 - `id` (String) Docker container name / unique identifier.
 - `image` (String) OCI image reference used by the container.
 - `kubeconfig` (String, Sensitive) Kubeconfig contents for accessing the cluster.

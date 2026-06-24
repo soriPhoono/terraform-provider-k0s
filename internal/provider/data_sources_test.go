@@ -57,6 +57,10 @@ func TestClusterDataSourceSchema(t *testing.T) {
 		"kubeconfig",
 		"status",
 		"single_node",
+		"endpoint",
+		"client_certificate",
+		"client_key",
+		"cluster_ca_certificate",
 	}
 	for _, name := range expectedAttrs {
 		if _, ok := resp.Schema.Attributes[name]; !ok {
@@ -70,6 +74,16 @@ func TestClusterDataSourceSchema(t *testing.T) {
 		}
 	} else {
 		t.Error("expected kubeconfig to be a StringAttribute")
+	}
+
+	for _, name := range []string{"client_certificate", "client_key", "cluster_ca_certificate"} {
+		if att, ok := resp.Schema.Attributes[name].(schema.StringAttribute); ok {
+			if !att.Sensitive {
+				t.Errorf("expected %s to be sensitive", name)
+			}
+		} else {
+			t.Errorf("expected %s to be a StringAttribute", name)
+		}
 	}
 }
 
@@ -94,7 +108,7 @@ func TestVersionsDataSourceSchema(t *testing.T) {
 		t.Fatal("expected at least one attribute")
 	}
 
-	expectedAttrs := []string{"versions", "latest"}
+	expectedAttrs := []string{"per_page", "include_prerelease", "versions", "latest"}
 	for _, name := range expectedAttrs {
 		if _, ok := resp.Schema.Attributes[name]; !ok {
 			t.Errorf("expected attribute %q in schema", name)
@@ -107,5 +121,27 @@ func TestVersionsDataSourceSchema(t *testing.T) {
 		}
 	} else {
 		t.Error("expected versions to be a ListAttribute")
+	}
+
+	if att, ok := resp.Schema.Attributes["per_page"].(schema.Int64Attribute); ok {
+		if !att.Optional {
+			t.Error("expected per_page to be optional")
+		}
+		if !att.Computed {
+			t.Error("expected per_page to be computed")
+		}
+	} else {
+		t.Error("expected per_page to be an Int64Attribute")
+	}
+
+	if att, ok := resp.Schema.Attributes["include_prerelease"].(schema.BoolAttribute); ok {
+		if !att.Optional {
+			t.Error("expected include_prerelease to be optional")
+		}
+		if !att.Computed {
+			t.Error("expected include_prerelease to be computed")
+		}
+	} else {
+		t.Error("expected include_prerelease to be a BoolAttribute")
 	}
 }

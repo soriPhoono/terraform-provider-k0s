@@ -906,6 +906,13 @@ func waitForReadiness(
 
 		time.Sleep(readinessPollInterval)
 	}
+	logs, _ := docker.logs(ctx, name, 50)
+	if logs != "" {
+		return "", fmt.Errorf(
+			"timed out after %v waiting for cluster to become ready\nContainer logs:\n%s",
+			timeout, logs,
+		)
+	}
 	return "", fmt.Errorf(
 		"timed out after %v waiting for cluster to become ready",
 		timeout,

@@ -59,3 +59,66 @@ output "kubeconfig" {
   run `k0s controller`, workers join via `k0s token create`. Networks and all
   containers are removed on destroy.
 - **Import**: Existing clusters can be imported by container name.
+  Single-node: `terraform import k0s_cluster.example <container-name>`.
+  Multi-node: `terraform import k0s_cluster.example <cluster-name>` (the provider
+  detects controllers and workers automatically).
+- **Customization**: Ports, volumes, tmpfs, environment variables, extra CLI
+  arguments, CPU, and memory limits are all configurable per container.
+- **Timeouts**: A `timeouts` block supports `create`, `read`, and `delete`
+  deadlines. The `readiness_timeout` attribute controls how long to wait for
+  the cluster control plane to become ready.
+
+## Troubleshooting
+
+### Port conflicts
+
+If you see `port is already allocated`, another cluster or service is using
+the default port 6443. Set a custom `ports` attribute to avoid conflicts:
+
+```hcl
+resource "k0s_cluster" "example" {
+  name    = "my-cluster"
+  ports   = ["6444:6443"]
+}
+```
+
+### Cluster does not become ready
+
+Check Docker container logs for details. The `wait_for_ready` attribute
+can be set to `false` to return immediately without polling:
+
+```hcl
+resource "k0s_cluster" "example" {
+  name           = "my-cluster"
+  wait_for_ready = false
+}
+```
+
+Container logs are included in readiness timeout errors automatically.
+
+### Docker daemon access
+
+The provider communicates with the Docker daemon via the CLI. Ensure:
+
+- `docker` is on your PATH
+- Your user has permission to access `/var/run/docker.sock`
+- Run `docker info` to verify
+
+### Cleanup after failed destroy
+
+If `terraform destroy` fails mid-operation, remove leftover resources manually:
+
+```shell
+docker container ls -a --filter "name=k0s-" -q | xargs docker rm -f
+docker network ls --filter "name=k0s-" -q | xargs docker network rm
+```
+
+### Limitations
+
+- **Update is not supported**. All mutable attributes use `RequiresReplace`,
+  so any change triggers destroy + recreate.
+- **Single-node port 6443** is the default host mapping. Create multiple
+  clusters with different `ports` or one at a time.
+- **`k0s_versions` data source** fetches releases from the GitHub API.
+  The number of results is controlled by `per_page` (default 10).
+  API rate limits apply to unauthenticated requests.
